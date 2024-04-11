@@ -1,0 +1,131 @@
+name: Generate Repo
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  generate-repo:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+        with:
+          ref: gh-pages
+
+      - uses: robinraju/release-downloader@v1.10
+        with: 
+            # The source repository path.
+            repository: "LizardByte/Sunshine"
+            
+            # A flag to set the download target as latest release
+            latest: true
+
+            # A flag to download from prerelease. It should be combined with latest flag.
+            preRelease: false
+            
+            # The name of the file to download.
+            # Use this field only to specify filenames other than tarball or zipball, if any.
+            # Supports wildcard pattern (eg: '*', '*.deb', '*.zip' etc..)
+            fileName: "*.deb"
+            
+            # Download the attached tarball (*.tar.gz)
+            tarBall: false
+            
+            # Download the attached zipball (*.zip)
+            zipBall: false
+            
+            # Relative path under $GITHUB_WORKSPACE to place the downloaded file(s)
+            out-file-path: "release_downloads"
+
+            # A flag to set if the downloaded assets are archives and should be extracted
+            extract: false
+            
+      - name: Build and Package
+        run: |
+          export DIRECTORY="$GITHUB_WORKSPACE"
+          cd $DIRECTORY
+
+          # import gpg key
+          export GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --import
+
+          # automatically rename and move debian packages to pool
+          for filename in release_downloads/*; do
+            package_name="$(dpkg-deb -f $filename Package)"
+            package_architecture="$(dpkg-deb -f $filename Architecture)"
+            package_version="$(dpkg-deb -f $filename Version)"
+            package_suite="$(basename $filename | awk -F - '{print $3}')"
+
+            # convert ubuntu number version to name
+            if [[ "$package_suite" =~ ^[0-9]+\.[0-9]+?$ ]]; then
+              package_suite="$(cat /usr/share/distro-info/ubuntu.csv | awk -F',' '{print $3" "$1}' | grep "$package_suite" | awk -F' ' '{print $1}')"
+            fi
+
+            echo "$filename $package_name $package_architecture $package_version $package_suite"
+            mkdir -p $DIRECTORY/deb/pool/$package_suite/$package_name/
+            mv $filename $DIRECTORY/deb/pool/$package_suite/$package_name/${package_name}_${package_version}_${package_architecture}.deb
+          done
+
+          # generate debian repo files
+          cd deb
+          do_hash() {
+            HASH_NAME=$1
+            HASH_CMD=$2
+            echo "${HASH_NAME}:"
+            for f in $(find -type f); do
+                f=$(echo $f | cut -c3-) # remove ./ prefix
+                if [ "$f" = "Release" ]; then
+                    continue
+                fi
+                echo " $(${HASH_CMD} ${f}  | cut -d" " -f1) $(wc -c $f)"
+            done
+          }
+          for dir in $DIRECTORY/deb/pool/*/; do
+            current_dist="$(basename $dir)"
+            mkdir -p dists/$current_dist/main/binary-arm64 dists/$current_dist/main/binary-amd64
+            dpkg-scanpackages --arch arm64 pool/$current_dist > dists/$current_dist/main/binary-arm64/Packages
+            dpkg-scanpackages --arch amd64 pool/$current_dist > dists/$current_dist/main/binary-amd64/Packages
+
+            cat dists/$current_dist/main/binary-arm64/Packages | gzip -9 > dists/$current_dist/main/binary-arm64/Packages.gz
+            cat dists/$current_dist/main/binary-amd64/Packages | gzip -9 > dists/$current_dist/main/binary-amd64/Packages.gz
+
+            cat << EOF > dists/$current_dist/Release
+          Suite: $current_dist
+          Codename: $current_dist
+          Architectures: arm64 amd64
+          Components: main
+          Description: LizardByte Apt Repo
+          Date: $(date -Ru)
+          EOF
+            cd dists/$current_dist
+            do_hash "MD5Sum" "md5sum" >> Release
+            do_hash "SHA1" "sha1sum" >> Release
+            do_hash "SHA256" "sha256sum" >> Release
+            cd ../../
+
+            # sign releases
+            cat ./dists/$current_dist/Release | gpg --default-key LizardByte -abs > ./dists/$current_dist/Release.gpg
+            cat ./dists/$current_dist/Release | gpg --default-key LizardByte -abs --clearsign > ./dists/$current_dist/InRelease      
+          done
+          cd ..
+
+          # remove any remaining release assets
+          rm -rf $DIRECTORY/release_downloads
+
+      - name: Upload
+        run: |
+          cd $GITHUB_WORKSPACE
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          bash -c "git add . && git commit -m 'Update available releases'" || true
+          git push
