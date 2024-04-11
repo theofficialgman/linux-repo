@@ -22,7 +22,12 @@ jobs:
         with:
           ref: gh-pages
 
-      - uses: robinraju/release-downloader@v1.10
+      - name: Install additional dependencies
+        run: |
+          sudo apt install createrepo-c
+
+      - name: Download debs from latest release
+        uses: robinraju/release-downloader@v1.10
         with: 
             # The source repository path.
             repository: "LizardByte/Sunshine"
@@ -50,7 +55,7 @@ jobs:
             # A flag to set if the downloaded assets are archives and should be extracted
             extract: false
             
-      - name: Build and Package
+      - name: Build and Package Debian Repo
         run: |
           export DIRECTORY="$GITHUB_WORKSPACE"
           cd $DIRECTORY
@@ -122,7 +127,71 @@ jobs:
           # remove any remaining release assets
           rm -rf $DIRECTORY/release_downloads
 
-      - name: Upload
+      - name: Download rpms from latest release
+        uses: robinraju/release-downloader@v1.10
+        with: 
+            # The source repository path.
+            repository: "LizardByte/Sunshine"
+            
+            # A flag to set the download target as latest release
+            latest: true
+
+            # A flag to download from prerelease. It should be combined with latest flag.
+            preRelease: false
+            
+            # The name of the file to download.
+            # Use this field only to specify filenames other than tarball or zipball, if any.
+            # Supports wildcard pattern (eg: '*', '*.deb', '*.zip' etc..)
+            fileName: "*.rpm"
+            
+            # Download the attached tarball (*.tar.gz)
+            tarBall: false
+            
+            # Download the attached zipball (*.zip)
+            zipBall: false
+            
+            # Relative path under $GITHUB_WORKSPACE to place the downloaded file(s)
+            out-file-path: "release_downloads"
+
+            # A flag to set if the downloaded assets are archives and should be extracted
+            extract: false
+
+      - name: Build and Package RPM Repo
+        run: |
+          export DIRECTORY="$GITHUB_WORKSPACE"
+          cd $DIRECTORY
+
+          # import gpg key
+          export GNUPGHOME="$(mktemp -d /tmp/pgpkeys-XXXXXX)"
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --import
+
+          # automatically rename and move rpm packages to repo
+          for filename in release_downloads/*; do
+            package_full_name="$(rpm -q $filename)"
+            package_architecture="$(rpm -q --queryformat "%{ARCH}\n" $filename)"
+            package_suite="$(basename $filename | awk -F - '{print $3}')"
+
+            echo "$filename $package_full_name $package_architecture"
+            mkdir -p $DIRECTORY/rpm/fedora/releases/$package_suite/$package_architecture/
+            mv $filename $DIRECTORY/rpm/fedora/releases/$package_suite/$package_architecture/${package_full_name}.rpm
+            
+            # sign rpm
+            rpm --define "_gpg_name LizardByte" --addsign $DIRECTORY/rpm/fedora/releases/$package_suite/$package_architecture/${package_full_name}.rpm
+          done
+
+          # generate rpm repo files
+          cd rpm
+          for dir1 in $DIRECTORY/rpm/fedora/releases/*/; do
+            for dir2 in $dir1/*/; do
+              createrepo_c $dir2/
+            done
+          done
+          cd ..
+
+          # remove any remaining release assets
+          rm -rf $DIRECTORY/release_downloads
+
+      - name: Upload changes to git repo
         run: |
           cd $GITHUB_WORKSPACE
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
